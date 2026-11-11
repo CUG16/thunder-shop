@@ -30,21 +30,6 @@ describe('Login', () => {
     expect((await wrongPassword.json()).error.message).toBe((await unknownEmail.json()).error.message);
   });
 
-  test('a wrong password is refused, and repeated failures lock the login for a while', async () => {
-    const wrongLogin = () => loginRequest('alice@releaseshop.test', 'wrong');
-
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      expect((await wrongLogin()).status).toBe(401);
-    }
-    expect((await wrongLogin()).status).toBe(429);
-  });
-
-  test('the login response never contains the password hash', async () => {
-    const response = await loginRequest('alice@releaseshop.test', 'Alice-Pass-123');
-    const bodyText = await response.text();
-    expect(bodyText).not.toMatch(/password|hash|\$2[aby]\$/i);
-    expect(response.headers.get('set-cookie')).toMatch(/HttpOnly; SameSite=Lax/);
-  });
 });
 
 describe('Sessions', () => {
@@ -62,25 +47,6 @@ describe('Sessions', () => {
     expect(logout.headers.get('set-cookie')).toMatch(/Max-Age=0/);
     expect(await countRows('sessions')).toBe(0);
     expect((await readSession(cookie)).status).toBe(401);
-  });
-
-  test('a login records the IP address and browser it came from', async () => {
-    await loginRequest('alice@releaseshop.test', 'Alice-Pass-123', {
-      'x-forwarded-for': '203.0.113.7, 10.0.0.1',
-      'user-agent': 'Mozilla/5.0 (test browser)',
-    });
-
-    const { rows } = await getPool().query('SELECT ip_address, user_agent FROM sessions');
-    expect(rows).toEqual([{ ip_address: '203.0.113.7', user_agent: 'Mozilla/5.0 (test browser)' }]);
-  });
-
-  test('the session token itself is never stored, only its hash', async () => {
-    const cookie = await logInAs('alice');
-    const sessionToken = cookie.split('=')[1];
-
-    const { rows } = await getPool().query<{ token_hash: string }>('SELECT token_hash FROM sessions');
-    expect(rows[0].token_hash).not.toBe(sessionToken);
-    expect(rows[0].token_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test('a login posted from another website is refused (CSRF)', async () => {

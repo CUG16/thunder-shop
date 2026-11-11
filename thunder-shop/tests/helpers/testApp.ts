@@ -1,4 +1,5 @@
 import { POST as loginRoute } from '@/app/api/auth/login/route';
+import { POST as ordersRoute } from '@/app/api/orders/route';
 import { getPool } from '@/server/db/connection';
 import { runMigrations } from '@/server/db/migrate';
 import { seedDatabase, seedUsers } from '@/server/db/seed';
@@ -52,7 +53,18 @@ export async function logInAs(who: 'admin' | 'alice' | 'bob'): Promise<string> {
   return response.headers.get('set-cookie')!.split(';')[0];
 }
 
+export function placeOrderAs(cookie: string | undefined, body: unknown, headers?: Record<string, string>) {
+  return ordersRoute(apiRequest('POST', '/api/orders', { body, cookie, headers }), noUrlParams);
+}
+
+export const buy = (productId: number, quantity: unknown) => ({ items: [{ productId, quantity }] });
+
 // Straight-from-the-database checks, so the tests do not rely on the API to verify the API.
+export async function stockInDatabase(productId: number): Promise<number> {
+  const { rows } = await getPool().query<{ stock: number }>('SELECT stock FROM products WHERE id = $1', [productId]);
+  return rows[0].stock;
+}
+
 export async function countRows(table: 'orders' | 'order_items' | 'customer_product_totals' | 'audit_log' | 'sessions'): Promise<number> {
   const { rows } = await getPool().query<{ total: number }>(`SELECT count(*)::int AS total FROM ${table}`);
   return rows[0].total;
