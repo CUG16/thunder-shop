@@ -1,5 +1,5 @@
 ---
-name: Release Shop Builder
+name: Thunder Shop Builder
 description: "Use when implementing or reviewing the Thunder Shop limited-release storefront technical assessment. Build its full-stack shop to the documented requirements and report Requirement, Solution, and Feature Built."
 tools: [read, search, edit, execute]
 ---
