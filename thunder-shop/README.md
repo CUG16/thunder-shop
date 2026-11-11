@@ -92,6 +92,19 @@ pnpm test
 The tests run against a separate database (`thunder_shop_test`) that is created automatically and wiped
 before every test. As a safety catch, they refuse to run against any database whose name doesn't end in `_test`.
 
+### Screenshots
+
+In [docs/screenshots/](docs/screenshots/), taken with the seed data, logged in as alice:
+
+| | |
+| --- | --- |
+| [Login](docs/screenshots/01-login.png) | The login screen |
+| [Products and cart](docs/screenshots/02-products-and-cart.png) | 2 sneakers and 1 poster in the cart. The sneakers show "Limit reached". |
+| [Price changed at checkout](docs/screenshots/03-price-changed-during-checkout.png) | An admin raised the poster's price mid-checkout. The order is refused, nothing is charged, and the new price is shown. |
+| [Order placed](docs/screenshots/04-order-placed-and-history.png) | After confirming, the order goes through at the new price and appears in the order history. |
+| [API tampering blocked](docs/screenshots/05-api-tampering-blocked.png) | Orders sent straight to the API with alice's login, skipping the website. A 3rd unit is refused, a sent price of $0.01 is ignored (charged $89.00), and a quantity of 1.5 is rejected. This page lays out the real requests and responses; it isn't part of the app. |
+| [Admin view](docs/screenshots/06-admin-all-products.png) | Logged in as admin: every product, including sold-out ones, with the stock left after the orders above. Admin changes are made through the API. |
+
 ### API documentation
 
 Every endpoint is described in [openapi.yaml](openapi.yaml) (OpenAPI 3.1). It covers what to send, what
@@ -229,6 +242,9 @@ check on order lines.
 
 ## 5. What I'd do next with more time
 
+- separate node js or nest.js wrapper repo to deal with database operations.
+- Add a check that compares the fields in `openapi.yaml` with the Zod schemas, so the API docs can't drift from the code.
+- Admin screens in the web page. Admin actions are API-only for now.
 - Move the login lockout counter from memory into the database or Redis, so it works across several servers
   and survives restarts.
 - Add per-IP rate limiting on login. Today someone can lock out a known email (including the admin's) by
@@ -238,9 +254,7 @@ check on order lines.
   switch off the "history can't be changed" triggers.
 - Add security headers (Content-Security-Policy, HSTS, frame protection).
 - A "log out everywhere" option, and a limit on sessions per user.
-- Admin screens in the web page. Admin actions are API-only for now.
-- Add a check that compares the fields in `openapi.yaml` with the Zod schemas, so the API docs can't drift
-  from the code.
+
 - A queue or waiting room for big releases, so a sudden rush is handled fairly rather than first-come by the
   millisecond.
 
@@ -256,8 +270,7 @@ rules down. I treated everything the AI produced as a draft that had to pass tes
   ([.github/agents/feature-builder.agent.md](.github/agents/feature-builder.agent.md)): the six business
   rules, the required layering, and "the API is the security boundary". Every AI session worked from the
   same checklist, so it couldn't quietly change scope.
-- [Tool(s) you used to build the shop, e.g. "GitHub Copilot in VS Code with that custom agent"] for the
-  build, and Claude Code for a security review at the end.
+- Tools used to build - GitHub Copilot in VS Code for build and Claude Code for a security review at the end.
 
 **What I decided myself**
 - The design choices that make the rules hold under real load: locking product rows inside one
@@ -284,9 +297,8 @@ rules down. I treated everything the AI produced as a draft that had to pass tes
   "passed" only because an old server was still holding the port. Reading the logs caught it.
 - I tested the "no Docker" setup instructions on a fresh PostgreSQL install rather than assuming they
   worked.
-- [One real example from the build where you rejected or rewrote AI output, and why. For example: it put
-  the purchase-limit check outside the transaction, it trusted a price from the request, or it wrote a
-  test that couldn't fail.]
+
+
 
 **What I'd keep doing**
 Writing the rules down first and making tests the definition of "done" is what made AI safe to use here.
