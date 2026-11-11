@@ -1,3 +1,4 @@
+import { unstable_rethrow } from 'next/navigation';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { isPostgresError, postgresErrorCode } from '../db/connection';
@@ -70,6 +71,10 @@ export function apiRoute<Params = unknown>(
       refuseCrossSiteWrites(request);
       response = await handler(request, { params: await context.params, requestId });
     } catch (error) {
+      // With Cache Components on, Next.js tries to prerender GET routes at build time and stops
+      // when a route reads the request (cookies, headers). That stop is a thrown error Next.js must
+      // handle itself, so it is passed on instead of being turned into a 500.
+      unstable_rethrow(error);
       response = errorResponse(error, requestId);
     }
     response.headers.set('x-request-id', requestId);
