@@ -1,0 +1,669 @@
+openapi: 3.1.0
+info:
+  title: Thunder Shop API
+  version: 1.0.0
+  description: |
+    API for a limited-release collectibles shop.
+
+    **Logging in.** `POST /auth/login` sets an `HttpOnly` session cookie (`thunder_shop_session`) that lasts
+    1 hour. Send it back on every other request. With curl, use `-c jar` to save it and `-b jar` to send it.
+
+    **Requests.** Request bodies must be `application/json` and at most 10,000 bytes. Unknown fields are
+    ignored: for example, a `price` sent with an order is dropped and never used.
+
+    **Cross-site requests.** A `POST`/`PATCH` whose `Origin` header names another website is refused with
+    `403 CROSS_SITE_REQUEST`.
+
+    **Errors.** Every error has the same shape (see `Error`). Every response carries an `x-request-id`
+    header with the same id as `error.requestId`, so a problem can be traced in the server logs.
+
+    **Business rules enforced by the server:**
+    1. Only customers can place orders. Only admins can create products or change price and stock.
+    2. Customers can only see their own orders.
+    3. The price charged is read from the database when the order is placed. The client never sends a price.
+    4. A customer can buy at most 2 units of each product in total, across all of their orders.
+    5. An order fully succeeds or fully fails.
+    6. Quantities are whole numbers of 1 or more.
+servers:
+  - url: http://localhost:3000/api
+    description: Local development (`pnpm dev`)
+tags:
+  - name: Auth
+    description: Logging in and out.
+  - name: Products
+    description: Reading the product list (customers and admins).
+  - name: Orders
+    description: Customers only.
+  - name: Admin
+    description: Admins only.
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: logIn
+      summary: Log in
+      description: |
+        Checks the email and password, and starts a session. A wrong email and a wrong password get the
+        same answer, so the API does not reveal which emails exist. After 5 failed attempts for one email,
+        that email is locked for 15 minutes.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: alice@releaseshop.test, password: Alice-Pass-123 }
+      responses:
+        '200':
+          description: Logged in. The session cookie is set.
+          headers:
+            Set-Cookie:
+              description: '`thunder_shop_session=<token>; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax` (plus `Secure` in production)'
+              schema: { type: string }
+            x-request-id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401':
+          description: '`INVALID_LOGIN`: the email or password is incorrect.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error: { code: INVALID_LOGIN, message: Email or password is incorrect., requestId: 6f1c0d7e-2a8b-4f3e-9b1a-0c2d3e4f5a6b }
+        '403': { $ref: '#/components/responses/CrossSite' }
+        '413': { $ref: '#/components/responses/BodyTooLarge' }
+        '415': { $ref: '#/components/responses/JsonRequired' }
+        '429':
+          description: '`TOO_MANY_ATTEMPTS`: 5 failed logins for this email in the last 15 minutes.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logOut
+      summary: Log out
+      description: Ends the session on the server and clears the cookie. Succeeds even if you were not logged in.
+      security: []
+      responses:
+        '200':
+          description: Logged out.
+          headers:
+            Set-Cookie:
+              description: Expires the session cookie.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [loggedOut]
+                properties:
+                  loggedOut: { type: boolean, const: true }
+        '403': { $ref: '#/components/responses/CrossSite' }
+
+  /auth/session:
+    get:
+      tags: [Auth]
+      operationId: getSession
+      summary: Who am I
+      responses:
+        '200':
+          description: The logged-in user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+
+  /products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List products
+      description: Customers see only products that are in stock. Admins see every product, including sold-out ones.
+      responses:
+        '200':
+          description: Products, ordered by id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [products]
+                properties:
+                  products:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+    post:
+      tags: [Admin]
+      operationId: createProduct
+      summary: Create a product
+      description: Admins only. Writes an audit log entry in the same transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProductRequest' }
+            example: { name: Limited hoodie, priceCents: 6500, stock: 20 }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+        '413': { $ref: '#/components/responses/BodyTooLarge' }
+        '415': { $ref: '#/components/responses/JsonRequired' }
+
+  /products/{productId}/price:
+    patch:
+      tags: [Admin]
+      operationId: changeProductPrice
+      summary: Change a product's price
+      description: |
+        Admins only. If the price really changes, the product's `priceVersion` goes up by one. An order
+        already in progress finishes at the old price first. Writes an audit log entry.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [priceCents]
+              properties:
+                priceCents: { $ref: '#/components/schemas/PriceCents' }
+            example: { priceCents: 19900 }
+      responses:
+        '200':
+          description: The updated product.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/BodyTooLarge' }
+        '415': { $ref: '#/components/responses/JsonRequired' }
+        '503': { $ref: '#/components/responses/ShopBusy' }
+
+  /products/{productId}/stock:
+    patch:
+      tags: [Admin]
+      operationId: changeProductStock
+      summary: Set a product's stock
+      description: Admins only. Sets the number of units in stock. Writes an audit log entry.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stock]
+              properties:
+                stock: { $ref: '#/components/schemas/Stock' }
+            example: { stock: 25 }
+      responses:
+        '200':
+          description: The updated product.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/BodyTooLarge' }
+        '415': { $ref: '#/components/responses/JsonRequired' }
+        '503': { $ref: '#/components/responses/ShopBusy' }
+
+  /admin/audit-log:
+    get:
+      tags: [Admin]
+      operationId: listAuditLog
+      summary: Read the audit log
+      description: Admins only. The 200 most recent product changes, newest first.
+      responses:
+        '200':
+          description: Audit entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditEntry' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+
+  /orders:
+    get:
+      tags: [Orders]
+      operationId: listMyOrders
+      summary: My order history
+      description: Customers only. Only the logged-in customer's own orders, newest first.
+      responses:
+        '200':
+          description: Orders.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+    post:
+      tags: [Orders]
+      operationId: placeOrder
+      summary: Place an order
+      description: |
+        Customers only. The whole order is one transaction: it either succeeds completely or saves nothing.
+
+        - **Price (rule 3):** each unit is charged the product's price in the database at the moment the order
+          is placed. There is no price field. Any `price` or `total` you send is ignored.
+        - **Price confirmation:** send the `priceVersion` you showed the customer. If the price has changed since,
+          the whole order is refused with `409 PRICE_CHANGED` and the new prices, so nobody is charged a price
+          they didn't see. Leave `priceVersion` out to accept the current price.
+        - **Limit (rule 4):** at most 2 units of each product per customer, counting all earlier orders.
+        - **Retries:** send an `Idempotency-Key` header. Sending the same key again returns the first order with
+          `200` instead of buying again.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Any unique value per checkout attempt, for example a UUID. A random one is used if you leave it out.
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{8,100}$' }
+          example: 3f2b8c1e-7d4a-4c9b-a1e2-5f6d7c8b9a0e
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlaceOrderRequest' }
+            example:
+              items:
+                - { productId: 1, quantity: 2, priceVersion: 1 }
+                - { productId: 3, quantity: 1, priceVersion: 1 }
+      responses:
+        '201':
+          description: Order placed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '200':
+          description: This `Idempotency-Key` was used before. The original order is returned and nothing new is bought.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403':
+          description: '`NOT_ALLOWED` (not a customer) or `CROSS_SITE_REQUEST`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`NOT_FOUND`: one of the products does not exist. Nothing was saved.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            The order breaks a rule and nothing was saved:
+            - `PURCHASE_LIMIT_EXCEEDED`: more than 2 units of a product in total. `details` is a `PurchaseLimitDetails`.
+            - `OUT_OF_STOCK`: not enough units left. `details` is an `OutOfStockDetails`.
+            - `PRICE_CHANGED`: a price changed since the customer saw it. `details` is a `PriceChangedDetails`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                limit:
+                  summary: Purchase limit
+                  value:
+                    error:
+                      code: PURCHASE_LIMIT_EXCEEDED
+                      message: You can buy at most 2 units of this product in total. You already have 2.
+                      details: { productId: 1, limitPerCustomer: 2, alreadyBought: 2, requested: 1 }
+                      requestId: 6f1c0d7e-2a8b-4f3e-9b1a-0c2d3e4f5a6b
+                priceChanged:
+                  summary: Price changed
+                  value:
+                    error:
+                      code: PRICE_CHANGED
+                      message: A price changed while you were shopping. Nothing was bought. Check the new price and try again.
+                      details:
+                        changes:
+                          - { productId: 1, productName: Midnight Runner sneakers, newPriceCents: 26900, newPriceVersion: 2 }
+                      requestId: 6f1c0d7e-2a8b-4f3e-9b1a-0c2d3e4f5a6b
+        '413': { $ref: '#/components/responses/BodyTooLarge' }
+        '415': { $ref: '#/components/responses/JsonRequired' }
+        '503': { $ref: '#/components/responses/ShopBusy' }
+
+  /orders/{orderId}:
+    get:
+      tags: [Orders]
+      operationId: getMyOrder
+      summary: One of my orders
+      description: Customers only. Another customer's order gives the same `404` as an order that does not exist.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[1-9]\d{0,14}$' }
+          example: '1'
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/NotLoggedIn' }
+        '403': { $ref: '#/components/responses/NotAllowed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+security:
+  - sessionCookie: []
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: thunder_shop_session
+      description: Set by `POST /auth/login`.
+
+  headers:
+    RequestId:
+      description: Id of this request, also in `error.requestId`. Quote it when reporting a problem.
+      schema: { type: string, format: uuid }
+
+  parameters:
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[1-9]\d{0,14}$' }
+      example: '1'
+
+  schemas:
+    Role:
+      type: string
+      enum: [customer, admin]
+
+    User:
+      type: object
+      required: [id, email, role]
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Not case-sensitive. Surrounding spaces are removed.
+        password:
+          type: string
+          minLength: 1
+          description: At most 72 bytes in UTF-8 (the most bcrypt can read). Longer passwords are rejected.
+
+    PriceCents:
+      type: integer
+      minimum: 0
+      maximum: 10000000
+      description: Price in cents. 24900 means $249.00.
+
+    Stock:
+      type: integer
+      minimum: 0
+      maximum: 1000000
+
+    Product:
+      type: object
+      required: [id, name, priceCents, priceVersion, stock, updatedAt]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        priceCents: { $ref: '#/components/schemas/PriceCents' }
+        priceVersion:
+          type: integer
+          minimum: 1
+          description: Goes up by one every time the price changes. Send it with an order to confirm the price the customer saw.
+        stock: { $ref: '#/components/schemas/Stock' }
+        updatedAt: { type: string, format: date-time }
+      example: { id: 1, name: Midnight Runner sneakers, priceCents: 24900, priceVersion: 1, stock: 10, updatedAt: '2026-11-11T09:00:00.000Z' }
+
+    ProductResponse:
+      type: object
+      required: [product]
+      properties:
+        product: { $ref: '#/components/schemas/Product' }
+
+    CreateProductRequest:
+      type: object
+      required: [name, priceCents, stock]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120, description: Surrounding spaces are removed. }
+        priceCents: { $ref: '#/components/schemas/PriceCents' }
+        stock: { $ref: '#/components/schemas/Stock' }
+
+    PlaceOrderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: Each product can appear only once.
+          items:
+            type: object
+            required: [productId, quantity]
+            properties:
+              productId: { type: integer, minimum: 1 }
+              quantity:
+                type: integer
+                minimum: 1
+                description: A whole number of 1 or more (rule 6). `0`, `-1`, `1.5` and `"2"` are rejected.
+              priceVersion:
+                type: integer
+                minimum: 1
+                description: Optional. The price version the customer was shown. Used only to detect a price change, never to set the price.
+
+    Order:
+      type: object
+      required: [id, createdAt, totalCents, items]
+      properties:
+        id: { type: integer }
+        createdAt: { type: string, format: date-time }
+        totalCents: { type: integer, description: Sum of quantity × unitPriceCents. }
+        items:
+          type: array
+          items:
+            type: object
+            required: [productId, productName, quantity, unitPriceCents]
+            properties:
+              productId: { type: integer }
+              productName: { type: string }
+              quantity: { type: integer, minimum: 1 }
+              unitPriceCents: { type: integer, description: 'The price charged per unit, saved when the order was placed.' }
+      example:
+        id: 7
+        createdAt: '2026-11-11T09:05:00.000Z'
+        totalCents: 54300
+        items:
+          - { productId: 1, productName: Midnight Runner sneakers, quantity: 2, unitPriceCents: 24900 }
+          - { productId: 3, productName: Signed tour poster, quantity: 1, unitPriceCents: 4500 }
+
+    OrderResponse:
+      type: object
+      required: [order]
+      properties:
+        order: { $ref: '#/components/schemas/Order' }
+
+    AuditEntry:
+      type: object
+      required: [id, happenedAt, actorUserId, actorEmail, action, productId, oldValue, newValue, requestId]
+      properties:
+        id: { type: integer }
+        happenedAt: { type: string, format: date-time }
+        actorUserId: { type: integer }
+        actorEmail: { type: string, format: email }
+        action: { type: string, enum: [product.created, product.price_changed, product.stock_changed] }
+        productId: { type: integer }
+        oldValue: { description: 'The value before the change, for example `{ "priceCents": 24900 }`. `null` for product.created.' }
+        newValue: { description: 'The value after the change, for example `{ "priceCents": 26900 }`.' }
+        requestId: { type: string, description: The request that made the change. }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - INVALID_LOGIN
+                - NOT_LOGGED_IN
+                - NOT_ALLOWED
+                - CROSS_SITE_REQUEST
+                - NOT_FOUND
+                - PURCHASE_LIMIT_EXCEEDED
+                - OUT_OF_STOCK
+                - PRICE_CHANGED
+                - BODY_TOO_LARGE
+                - JSON_REQUIRED
+                - TOO_MANY_ATTEMPTS
+                - SHOP_BUSY
+                - INTERNAL_ERROR
+            message: { type: string, description: A sentence that can be shown to a person. }
+            details:
+              description: Extra data for some codes. Absent for the others.
+              oneOf:
+                - title: VALIDATION_FAILED
+                  type: array
+                  items: { $ref: '#/components/schemas/ValidationProblem' }
+                - $ref: '#/components/schemas/PurchaseLimitDetails'
+                - $ref: '#/components/schemas/OutOfStockDetails'
+                - $ref: '#/components/schemas/PriceChangedDetails'
+            requestId: { type: string, format: uuid }
+
+    ValidationProblem:
+      type: object
+      required: [field, problem]
+      properties:
+        field: { type: string, example: items.0.quantity }
+        problem: { type: string, example: Quantity must be a whole number of 1 or more. }
+
+    PurchaseLimitDetails:
+      title: PURCHASE_LIMIT_EXCEEDED
+      type: object
+      required: [productId, limitPerCustomer, alreadyBought, requested]
+      properties:
+        productId: { type: integer }
+        limitPerCustomer: { type: integer, const: 2 }
+        alreadyBought: { type: integer }
+        requested: { type: integer }
+
+    OutOfStockDetails:
+      title: OUT_OF_STOCK
+      type: object
+      required: [productId, requested]
+      properties:
+        productId: { type: integer }
+        requested: { type: integer }
+
+    PriceChangedDetails:
+      title: PRICE_CHANGED
+      type: object
+      required: [changes]
+      properties:
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              productId: { type: integer }
+              productName: { type: string }
+              newPriceCents: { type: integer }
+              newPriceVersion: { type: integer }
+
+  responses:
+    ValidationFailed:
+      description: '`VALIDATION_FAILED`: some input is not valid. `details` lists each problem (see `ValidationProblem`).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: Some of the input is not valid.
+              details: [{ field: items.0.quantity, problem: Quantity must be a whole number of 1 or more. }]
+              requestId: 6f1c0d7e-2a8b-4f3e-9b1a-0c2d3e4f5a6b
+    NotLoggedIn:
+      description: '`NOT_LOGGED_IN`: no valid session cookie.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotAllowed:
+      description: '`NOT_ALLOWED` (wrong role for this action) or `CROSS_SITE_REQUEST`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    CrossSite:
+      description: '`CROSS_SITE_REQUEST`: the `Origin` header names another website.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: '`NOT_FOUND`: it does not exist, or it belongs to someone else.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BodyTooLarge:
+      description: '`BODY_TOO_LARGE`: the body is over 10,000 bytes.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    JsonRequired:
+      description: '`JSON_REQUIRED`: the body must be sent as `application/json`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ShopBusy:
+      description: '`SHOP_BUSY`: the database was too busy (lock wait or deadlock). Nothing was saved, so it is safe to retry.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

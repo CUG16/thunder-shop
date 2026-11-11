@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: shop
       POSTGRES_DB: thunder_shop
     ports:
-      - '5433:5432'   # 5433 on your machine, so it does not clash with a Postgres you already run
+      # 5433 on your machine, so it does not clash with a Postgres you already run.
+      # Bound to 127.0.0.1 only: the shop/shop login must not be reachable from other machines on your network.
+      - '127.0.0.1:5433:5432'
     volumes:
       - thunder_shop_data:/var/lib/postgresql/data
     healthcheck:

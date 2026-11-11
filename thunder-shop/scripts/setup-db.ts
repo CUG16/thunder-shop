@@ -1,4 +1,4 @@
-import { closePool, DEFAULT_DATABASE_URL } from '@/server/db/connection';
+import { closePool, resolveDatabaseUrl, withPasswordHidden } from '@/server/db/connection';
 import { runMigrations } from '@/server/db/migrate';
 import { seedDatabase, seedUsers } from '@/server/db/seed';
 
@@ -18,8 +18,9 @@ async function main() {
 main()
   .catch((error) => {
     if ((error as { code?: string }).code === 'ECONNREFUSED') {
-      console.error(`Could not reach PostgreSQL at ${process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL}.`);
-      console.error('Start it with:  pnpm db:up');
+      console.error(`Could not reach PostgreSQL at ${withPasswordHidden(resolveDatabaseUrl())}.`);
+      console.error('With Docker:     pnpm db:up   then run this again.');
+      console.error('Without Docker:  start your own PostgreSQL and set DATABASE_URL. See "Setup without Docker" in README.md.');
     } else {
       console.error(error);
     }

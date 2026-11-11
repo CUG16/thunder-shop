@@ -6,7 +6,8 @@ import { AppError, crossSiteRequest, validationFailed } from '../errors';
 
 export type RouteContext<Params> = { params: Promise<Params> };
 
-const MAX_BODY_CHARACTERS = 10_000;
+/** Every valid request body is far below this. Measured in bytes, not characters, because memory is spent in bytes. */
+export const MAX_BODY_BYTES = 10_000;
 
 export function jsonResponse(body: unknown, httpStatus = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status: httpStatus, headers });
@@ -86,6 +87,36 @@ export function apiRoute<Params = unknown>(
 const describeProblems = (error: z.ZodError) =>
   error.issues.map((issue) => ({ field: issue.path.join('.') || '(body)', problem: issue.message }));
 
+const bodyTooLarge = () =>
+  new AppError(413, 'BODY_TOO_LARGE', `The request body is too large. The limit is ${MAX_BODY_BYTES} bytes.`);
+
+/**
+ * Reads the body as text without ever holding more than `maxBytes` of it in memory.
+ * A declared Content-Length over the limit is refused before anything is read. The body is then read
+ * chunk by chunk and the read stops as soon as the limit is passed, because the header can be missing
+ * (chunked uploads) or wrong.
+ */
+async function readBodyWithinLimit(request: Request, maxBytes: number): Promise<string> {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (declaredLength > maxBytes) throw bodyTooLarge();
+  if (!request.body) return '';
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    if (receivedBytes > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw bodyTooLarge();
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 /** Reads the JSON body and checks it against a schema. Throws a 400 with the list of problems if it does not fit. */
 export async function readJsonBody<Schema extends z.ZodType>(request: Request, schema: Schema): Promise<z.infer<Schema>> {
   // Only JSON is accepted. Plain HTML forms on other websites cannot send JSON, which blocks cross-site form posts.
@@ -93,10 +124,7 @@ export async function readJsonBody<Schema extends z.ZodType>(request: Request, s
     throw new AppError(415, 'JSON_REQUIRED', 'Send the request body as application/json.');
   }
 
-  const bodyText = await request.text();
-  if (bodyText.length > MAX_BODY_CHARACTERS) {
-    throw new AppError(413, 'BODY_TOO_LARGE', 'The request body is too large.');
-  }
+  const bodyText = await readBodyWithinLimit(request, MAX_BODY_BYTES);
 
   let body: unknown;
   try {
